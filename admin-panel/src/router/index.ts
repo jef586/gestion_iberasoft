@@ -4,6 +4,7 @@ import AppLayout from '../components/AppLayout.vue'
 import Login from '../pages/Login.vue'
 import Dashboard from '../pages/Dashboard.vue'
 import Customers from '../pages/Customers.vue'
+import Plans from '../pages/Plans.vue'
 import Licenses from '../pages/Licenses.vue'
 import Payments from '../pages/Payments.vue'
 
@@ -33,6 +34,11 @@ const router = createRouter({
           path: 'customers',
           name: 'customers',
           component: Customers
+        },
+        {
+          path: 'plans',
+          name: 'plans',
+          component: Plans
         },
         {
           path: 'licenses',
