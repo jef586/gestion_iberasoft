@@ -113,9 +113,9 @@ CREATE POLICY "Admins can insert telemetry_heartbeats" ON telemetry_heartbeats
 -- Inserting the 2 internal admins.
 -- The actual auth users must be created in the Auth service/dashboard with these IDs.
 
-INSERT INTO admins (id) VALUES
-    ('00000000-0000-0000-0000-000000000001'),
-    ('00000000-0000-0000-0000-000000000002');
+-- INSERT INTO admins (id) VALUES
+--    ('00000000-0000-0000-0000-000000000001'),
+--    ('00000000-0000-0000-0000-000000000002');
 
 
 -- ------------------------------------------------------------
