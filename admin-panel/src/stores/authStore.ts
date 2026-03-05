@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { supabase } from '../api/supabase'
 import type { Session, User } from '@supabase/supabase-js'
-import { useRouter } from 'vue-router'
 
 export const useAuthStore = defineStore('auth', () => {
   const session = ref<Session | null>(null)
@@ -27,21 +26,55 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login(email: string) {
-    // For this task we only need the structure, but a real login would use password or magic link
-    // The prompt says "Login funcionando con Supabase", so I should probably implement signInWithPassword
-    // But I don't have a UI for password yet. The user said "No implementar modales ni forms" but "Login funcionando".
-    // I will implement the method to be called by a form later.
-    return supabase.auth.signInWithOtp({ email })
+    loading.value = true
+    try {
+      return await supabase.auth.signInWithOtp({ email })
+    } finally {
+      loading.value = false
+    }
   }
   
   async function loginWithPassword(email: string, password: string) {
-      return supabase.auth.signInWithPassword({ email, password })
+    loading.value = true
+    try {
+      const result = await supabase.auth.signInWithPassword({ email, password })
+      if (result.data.session) {
+        session.value = result.data.session
+        user.value = result.data.session.user
+      }
+      return result
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function signUp(email: string, password: string) {
+    loading.value = true
+    try {
+      const result = await supabase.auth.signUp({ 
+        email, 
+        password,
+      })
+      // Supabase default is "confirm email", so session might be null
+      if (result.data.session) {
+        session.value = result.data.session
+        user.value = result.data.session.user
+      }
+      return result
+    } finally {
+      loading.value = false
+    }
   }
 
   async function logout() {
-    await supabase.auth.signOut()
-    session.value = null
-    user.value = null
+    loading.value = true
+    try {
+      await supabase.auth.signOut()
+      session.value = null
+      user.value = null
+    } finally {
+      loading.value = false
+    }
   }
 
   return {
@@ -52,6 +85,7 @@ export const useAuthStore = defineStore('auth', () => {
     initialize,
     login,
     loginWithPassword,
+    signUp,
     logout
   }
 })
