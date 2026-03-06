@@ -154,12 +154,17 @@ export const useLicensesStore = defineStore('licenses', () => {
       const graceUntil = new Date(expiresAt)
       graceUntil.setDate(graceUntil.getDate() + GRACE_DAYS)
 
+      // Generate a random license key
+      const licenseKey = Math.random().toString(36).substring(2, 10).toUpperCase() + 
+                         Math.random().toString(36).substring(2, 10).toUpperCase();
+
       const { data, error: err } = await supabase
         .from('licenses')
         .insert({
           customer_id: payload.customerId,
           plan_id: payload.planId,
           status: 'trial',
+          license_key: licenseKey,
           expires_at: expiresAt.toISOString(),
           grace_until: graceUntil.toISOString(),
           signature: `TRIAL-SIGNATURE-${Date.now()}` // Temporary fix for NOT NULL constraint
