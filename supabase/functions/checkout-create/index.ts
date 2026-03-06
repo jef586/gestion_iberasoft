@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { FakeProvider, PaymentProvider } from "../_shared/PaymentProvider.ts"
+import { logAudit } from "../_shared/audit-logger.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -129,25 +130,16 @@ serve(async (req) => {
         }
 
         // 7. Create Audit Log
-        const { error: auditError } = await supabaseClient
-            .from('audit_logs')
-            .insert({
-                action: 'CHECKOUT_CREATED',
-                entity: 'payments',
-                actor: 'admin', // As per requirements "actor = admin" (since this is called by system/admin panel mostly?) 
-                // or maybe user? User said "Auth + RLS admin-only para el panel interno".
-                // If this function is called from the text, it says "actor = admin".
-                metadata: {
-                    customerId,
-                    planId,
-                    provider: 'fake'
-                }
-            })
-
-        if (auditError) {
-            // Non-blocking but good to log
-            console.error('Audit Log Error:', auditError)
-        }
+        await logAudit(supabaseClient, {
+            action: 'CHECKOUT_CREATED',
+            entity: 'payments',
+            actor: 'admin',
+            metadata: {
+                customerId,
+                planId,
+                provider: 'fake'
+            }
+        })
 
         // 8. Return Response
         return new Response(

@@ -1,6 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+import { logAudit } from "../_shared/audit-logger.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -96,22 +97,16 @@ serve(async (req) => {
         }
 
         // 6. Audit Log
-        // Action: HEARTBEAT_RECEIVED
-        const { error: auditError } = await supabaseClient.from('audit_logs').insert({
+        await logAudit(supabaseClient, {
             action: 'HEARTBEAT_RECEIVED',
             entity: 'licenses',
-            entity_id: licenseId,
+            entityId: licenseId,
             actor: 'pos',
             metadata: {
                 deviceFingerprint,
                 lastSeenAt
             }
         })
-
-        if (auditError) {
-            console.error('Audit log error:', auditError)
-            // We don't fail the request if audit fails, but we log it.
-        }
 
         // 7. Response
         return new Response(

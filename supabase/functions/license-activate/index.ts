@@ -1,6 +1,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+import { logAudit } from "../_shared/audit-logger.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -153,10 +154,10 @@ serve(async (req) => {
             .is('revoked_at', null)
 
         // 8. Audit Log
-        await supabaseClient.from('audit_logs').insert({
+        await logAudit(supabaseClient, {
             action: 'LICENSE_DEVICE_ACTIVATED',
             entity: 'licenses',
-            entity_id: licenseId,
+            entityId: licenseId,
             actor: 'pos',
             metadata: {
                 deviceFingerprint,

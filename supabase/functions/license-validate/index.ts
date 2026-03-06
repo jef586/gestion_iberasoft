@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { generateLicenseToken, verifyLicenseToken, LicensePayload } from "../_shared/license-token.ts"
+import { logAudit } from "../_shared/audit-logger.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -155,16 +156,16 @@ serve(async (req) => {
              }).eq('id', license.id);
              
              // Log token issuance
-             await supabaseClient.from('audit_logs').insert({
+             await logAudit(supabaseClient, {
                 action: 'LICENSE_TOKEN_ISSUED',
                 entity: 'licenses',
-                entity_id: license.id,
+                entityId: license.id,
                 actor: 'system',
                 metadata: {
                     reason: licenseToken ? 'refresh' : 'create',
                     token_version: license.token_version
                 }
-            });
+            })
         }
 
         // 7. Validate Device
@@ -189,10 +190,10 @@ serve(async (req) => {
         }
 
         // 8. Audit Log
-        const { error: auditError } = await supabaseClient.from('audit_logs').insert({
+        await logAudit(supabaseClient, {
             action: 'LICENSE_VALIDATED',
             entity: 'licenses',
-            entity_id: license.id,
+            entityId: license.id,
             actor: 'pos',
             metadata: {
                 deviceFingerprint,
@@ -203,8 +204,6 @@ serve(async (req) => {
                 tokenRefreshed: !tokenValid
             }
         })
-
-        if (auditError) console.error("Audit log error:", auditError)
 
         // 9. Telemetry Heartbeat (Upsert)
         const { error: telemetryError } = await supabaseClient.from('telemetry_heartbeats').upsert({

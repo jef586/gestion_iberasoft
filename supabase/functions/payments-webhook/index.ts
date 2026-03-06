@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { verifySignature, normalizeEvent } from "../_shared/webhook-utils.ts";
 import { NormalizedEvent } from "../_shared/payment-types.ts";
+import { logAudit } from "../_shared/audit-logger.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -216,12 +217,16 @@ serve(async (req) => {
         }
 
         // 5. Audit Log (Payment Update + Webhook Processed)
-        // Log specialized 'PAYMENT_RECEIVED'
-        await supabaseClient.from('audit_logs').insert({
-            action: event.status === 'approved' ? 'PAYMENT_APPROVED' : 'PAYMENT_RECEIVED', // or REJECTED
+        
+        let action = 'PAYMENT_RECEIVED';
+        if (event.status === 'approved') action = 'PAYMENT_APPROVED';
+        else if (event.status === 'rejected') action = 'PAYMENT_REJECTED';
+
+        await logAudit(supabaseClient, {
+            action,
             entity: 'payments',
-            entity_id: paymentId,
-            actor: 'system',
+            entityId: paymentId,
+            actor: 'webhook',
             metadata: {
                 eventId: event.eventId,
                 provider: event.provider,
@@ -231,10 +236,10 @@ serve(async (req) => {
         });
 
         // Log 'PAYMENT_WEBHOOK_PROCESSED' for idempotency
-        await supabaseClient.from('audit_logs').insert({
+        await logAudit(supabaseClient, {
             action: 'PAYMENT_WEBHOOK_PROCESSED',
-            entity: 'system', // or payments?
-            actor: 'system',
+            entity: 'system',
+            actor: 'webhook',
             metadata: {
                 eventId: event.eventId,
                 provider: event.provider

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { supabase } from '../api/supabase'
+import { logAudit } from '../utils/auditLogger'
 
 export interface Customer {
   id: string
@@ -176,6 +177,21 @@ export const useLicensesStore = defineStore('licenses', () => {
       
       // Optimistic update or refetch
       await fetchLicenses()
+
+      // Audit Log
+      await logAudit(supabase, {
+        action: 'LICENSE_CREATED',
+        entity: 'licenses',
+        entityId: data.id,
+        actor: 'admin',
+        metadata: {
+          customerId: payload.customerId,
+          planId: payload.planId,
+          type: 'trial',
+          licenseKey
+        }
+      })
+
       return data
     } catch (e) {
       handleError(e, 'Error al crear licencia trial')
@@ -235,6 +251,19 @@ export const useLicensesStore = defineStore('licenses', () => {
       if (err) throw err
 
       await fetchLicenses()
+
+      // Audit Log
+      await logAudit(supabase, {
+        action: 'LICENSE_RENEWED',
+        entity: 'licenses',
+        entityId: licenseId,
+        actor: 'admin',
+        metadata: {
+          planId,
+          newExpiresAt: newExpiresAt.toISOString()
+        }
+      })
+
       return data
     } catch (e) {
       handleError(e, 'Error al renovar licencia')
@@ -262,6 +291,16 @@ export const useLicensesStore = defineStore('licenses', () => {
       if (idx !== -1) {
         items.value[idx].status = 'blocked'
       }
+
+      // Audit Log
+      await logAudit(supabase, {
+        action: 'LICENSE_BLOCKED',
+        entity: 'licenses',
+        entityId: licenseId,
+        actor: 'admin',
+        metadata: { reason }
+      })
+
     } catch (e) {
       handleError(e, 'Error al bloquear licencia')
       throw e
@@ -307,6 +346,19 @@ export const useLicensesStore = defineStore('licenses', () => {
       if (err) throw err
 
       await fetchLicenses()
+
+      // Audit Log
+      await logAudit(supabase, {
+        action: 'LICENSE_REACTIVATED',
+        entity: 'licenses',
+        entityId: licenseId,
+        actor: 'admin',
+        metadata: {
+          previousStatus: license.status,
+          newExpiresAt: updates.expires_at
+        }
+      })
+
     } catch (e) {
       handleError(e, 'Error al reactivar licencia')
       throw e
