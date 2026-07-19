@@ -3,6 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { verifySignature, normalizeEvent } from "../_shared/webhook-utils.ts";
 import { NormalizedEvent } from "../_shared/payment-types.ts";
 import { logAudit } from "../_shared/audit-logger.ts";
+import { calculateLicenseDates } from "../_shared/license-state-resolver.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -46,15 +47,7 @@ serve(async (req) => {
 
         // 3. Idempotency Check
         // Check if we already processed this event
-        // We can check audit_logs for a specialized entry or payments table if we store event_id there.
-        // The requirements say: "Si ya se procesó ese evento: devolver 200 OK con { "ok": true, "deduped": true }"
-        // "La clave idempotente mínima debe ser: (provider, eventId)"
-
-        // We'll query audit_logs for this specific event processing to be safe, 
-        // OR we can rely on `payments` if we store the last event ID. 
-        // But one payment might have multiple events (pending -> approved). 
-        // So looking for "PAYMENT_WEBHOOK_PROCESSED" in audit logs with this eventId is safer.
-
+        // We look for "PAYMENT_WEBHOOK_PROCESSED" in audit logs with this eventId
         const { data: existingLog } = await supabaseClient
             .from('audit_logs')
             .select('id')
@@ -70,14 +63,9 @@ serve(async (req) => {
             );
         }
 
-        // 4. Process Logic (DB Transaction via separate calls or RPC? Supabase JS doesn't do complex transactions easily without RPC)
-        // We will do sequential operations with error handling. Ideally this should be an RPC.
-        // Requirement says: "Lógica DB (ideal con transacción)"
-        // We will stick to sequential for now as creating a new SQL function might be out of scope or we can do it if user permits.
-        // Given the constraints, I will do sequential updates.
-
+        // 4. Process Logic
         // 4a. Find Payment
-        let paymentId = event.metadata.paymentId;
+        let paymentId = event.metadata?.paymentId;
         let payment;
 
         if (paymentId) {
@@ -94,13 +82,9 @@ serve(async (req) => {
         }
 
         if (!payment) {
-            // Option: Insert new payment if not found? Or error? 
-            // Usually webhooks might arrive before client knows. 
-            // But checkout usually creates pending payment first.
-            // If not found, we might log and ignore or create a "orphan" payment.
-            // Requirement: "Actualizar: status, provider_ref if missing". Doesn't explicitly say "Create if missing".
-            // But "Buscar payments por..." implies it should accept existing.
             console.error(`Payment not found for ref ${event.providerRef}`);
+            // Return 404 but maybe we should log and continue? 
+            // If payment record is missing, we can't link it easily.
             return new Response(
                 JSON.stringify({ error: 'Payment not found' }),
                 { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 404 }
@@ -114,7 +98,7 @@ serve(async (req) => {
             .from('payments')
             .update({
                 status: event.status,
-                provider_ref: event.providerRef, // Ensure it's set
+                provider_ref: event.providerRef,
                 updated_at: new Date().toISOString()
             })
             .eq('id', paymentId);
@@ -125,76 +109,79 @@ serve(async (req) => {
 
         // 4c. Activate/Renew License if Approved
         if (event.status === 'approved') {
-            // Check for existing active license for this customer (+ plan?)
-            // Requirement: "Si customer NO tiene licencia activa -> crear... Si ya tiene -> renovar"
-            // We need plan details to know duration.
-            // We can get planId from payment metadata or payment record (we didn't store plan_id in payment strictly? 
-            // Wait, payment table has customer_id. Does it have plan_id? 
-            // The previous conversation's schema might not have plan_id in payments, but it has amount. 
-            // Luckily event metadata should have planId.
-
             const customerId = payment.customer_id;
-            const planId = event.metadata.planId;
+            // planId might come from metadata or we need to fetch it if not present
+            const planId = event.metadata?.planId || payment.plan_id; // assuming payment might have plan_id
 
             if (!planId) {
                 console.error('Missing planId in metadata for activation');
-                // Proceed without license activation? Or fail? 
-                // Failing might retry webhook. Let's log error.
             } else {
                 // Get Plan Duration
                 const { data: plan } = await supabaseClient.from('plans').select('duration_days').eq('id', planId).single();
                 const durationDays = plan?.duration_days || 30;
                 const graceDays = Number(Deno.env.get('GRACE_DAYS') ?? 7);
 
-                // Check existing license
-                const { data: activeLicense } = await supabaseClient
+                // Check existing license (active, trial, expired, grace)
+                const { data: existingLicense } = await supabaseClient
                     .from('licenses')
                     .select('*')
                     .eq('customer_id', customerId)
-                    .eq('plan_id', planId) // Assuming one license per plan type? Or just one active license per user?
-                    // "Si customer NO tiene licencia activa" - implies generic. 
-                    // Let's assume matches planId.
-                    .in('status', ['active', 'past_due']) // active or maybe validation needed
+                    .eq('plan_id', planId)
+                    // We check for any license that is not blocked/revoked basically.
+                    // Or specifically look for the one to renew.
+                    // If multiple exist, pick the latest one?
+                    .neq('status', 'blocked')
                     .order('expires_at', { ascending: false })
                     .limit(1)
                     .maybeSingle();
 
-                if (activeLicense) {
-                    // Renew
-                    const currentExpires = new Date(activeLicense.expires_at);
-                    // If it's already expired (past_due), valid from NOW? Or from old expiry?
-                    // Usually from NOW if it was long ago. 
-                    // If distinct logic not specified, let's just add days to current max(expires_at, now).
+                if (existingLicense) {
+                    // Renew / Reactivate
                     const now = new Date();
-                    const baseDate = currentExpires > now ? currentExpires : now;
-                    baseDate.setDate(baseDate.getDate() + durationDays);
-                    const newExpiresAt = baseDate.toISOString();
+                    const currentExpires = new Date(existingLicense.expires_at);
+                    
+                    // If current expiration is in the future, extend from there.
+                    // If in the past (expired), start from NOW.
+                    let startDate = now;
+                    if (currentExpires > now) {
+                        startDate = currentExpires;
+                    }
 
-                    // Calculate Grace
-                    const graceDate = new Date(baseDate);
-                    graceDate.setDate(graceDate.getDate() + graceDays);
+                    const { expiresAt, graceUntil } = calculateLicenseDates(startDate, durationDays, graceDays);
 
                     const { data: updatedLicense, error: licError } = await supabaseClient
                         .from('licenses')
                         .update({
-                            status: 'active',
-                            expires_at: newExpiresAt,
-                            grace_until: graceDate.toISOString(),
+                            status: 'active', // Reactivate if expired
+                            expires_at: expiresAt.toISOString(),
+                            grace_until: graceUntil.toISOString(),
                             updated_at: new Date().toISOString()
                         })
-                        .eq('id', activeLicense.id)
+                        .eq('id', existingLicense.id)
                         .select()
                         .single();
 
                     if (licError) throw licError;
                     licenseId = updatedLicense.id;
+
+                    // Audit Renewal/Reactivation
+                    const action = existingLicense.status === 'expired' ? 'LICENSE_REACTIVATED' : 'LICENSE_RENEWED';
+                    await logAudit(supabaseClient, {
+                        action,
+                        entity: 'licenses',
+                        entityId: licenseId,
+                        actor: 'system',
+                        metadata: {
+                            previousStatus: existingLicense.status,
+                            newExpiresAt: expiresAt.toISOString(),
+                            paymentId
+                        }
+                    });
+
                 } else {
-                    // Create New
+                    // Create New License
                     const now = new Date();
-                    const expiresDate = new Date();
-                    expiresDate.setDate(now.getDate() + durationDays);
-                    const graceDate = new Date(expiresDate);
-                    graceDate.setDate(graceDate.getDate() + graceDays);
+                    const { expiresAt, graceUntil } = calculateLicenseDates(now, durationDays, graceDays);
 
                     const { data: newLicense, error: licError } = await supabaseClient
                         .from('licenses')
@@ -203,18 +190,33 @@ serve(async (req) => {
                             plan_id: planId,
                             status: 'active',
                             starts_at: now.toISOString(),
-                            expires_at: expiresDate.toISOString(),
-                            grace_until: graceDate.toISOString(),
-                            device_count: 0 // Default
+                            expires_at: expiresAt.toISOString(),
+                            grace_until: graceUntil.toISOString(),
+                            // license_key generated by default or trigger?
+                            // device_count: 0 // default
                         })
                         .select()
                         .single();
 
                     if (licError) throw licError;
                     licenseId = newLicense.id;
+                    
+                    await logAudit(supabaseClient, {
+                        action: 'LICENSE_CREATED',
+                        entity: 'licenses',
+                        entityId: licenseId,
+                        actor: 'system',
+                        metadata: {
+                            paymentId,
+                            expiresAt: expiresAt.toISOString()
+                        }
+                    });
                 }
             }
         }
+
+        // 5. Audit Log (Payment Update + Webhook Processed)
+        // ... (existing audit logic)
 
         // 5. Audit Log (Payment Update + Webhook Processed)
         

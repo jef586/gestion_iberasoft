@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logAudit } from "../_shared/audit-logger.ts"
+import { resolveLicenseState } from "../_shared/license-state-resolver.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -49,36 +50,38 @@ serve(async (req) => {
         }
 
         // 4. Validate License Status
-        if (license.status === 'blocked') {
+        const now = new Date()
+        const licenseState = resolveLicenseState(license, now);
+
+        if (licenseState.isBlocked) {
             return new Response(
                 JSON.stringify({ error: 'License is blocked' }),
                 { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 403 }
             )
         }
 
-        // Expiration check (considering grace logic if needed, but per requirements: 403 LICENSE_EXPIRED)
-        const now = new Date()
-        const expiresAt = new Date(license.expires_at)
-        // Check if expired and not in grace period? 
-        // Requirement says: "licencia no esté expirada (o si está en grace, decidir según supuesto)"
-        // Assumption B: Allow activation in grace. 
-        // So we strictly fail only if current time > expires_at AND current time > grace_until (if grace exists).
-        // Let's keep it simple: if status is 'expired', fail? Or check dates?
-        // Relying on status + date check for robustness.
+        if (licenseState.isExpired) {
+            // Persist expiration if needed (On Access Expiration)
+            if (licenseState.shouldPersistExpired) {
+                await supabaseClient
+                    .from('licenses')
+                    .update({ status: 'expired' })
+                    .eq('id', license.id);
+                
+                await logAudit(supabaseClient, {
+                    action: 'LICENSE_EXPIRED',
+                    entity: 'licenses',
+                    entityId: license.id,
+                    actor: 'system',
+                    metadata: {
+                        previousStatus: licenseState.storedStatus,
+                        effectiveStatus: 'expired',
+                        expiresAt: licenseState.expiresAt,
+                        graceUntil: licenseState.graceUntil
+                    }
+                });
+            }
 
-        // If status is expired, we check if we are in grace? 
-        // Actually, let's just check the date.
-        // If has grace_until and now > grace_until, definitely expired.
-        // If no grace_until and now > expires_at, expired.
-
-        let isExpired = false
-        if (license.grace_until) {
-            if (now > new Date(license.grace_until)) isExpired = true
-        } else {
-            if (now > expiresAt) isExpired = true
-        }
-
-        if (isExpired) {
             return new Response(
                 JSON.stringify({ error: 'License expired' }),
                 { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 403 }

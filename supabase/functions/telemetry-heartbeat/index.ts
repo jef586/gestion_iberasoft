@@ -2,6 +2,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logAudit } from "../_shared/audit-logger.ts"
+import { resolveLicenseState } from "../_shared/license-state-resolver.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -46,30 +47,38 @@ serve(async (req) => {
             )
         }
 
-        if (license.status === 'blocked') {
+        // 4. Check Expiration / Grace Period
+        const now = new Date()
+        const licenseState = resolveLicenseState(license, now);
+
+        if (licenseState.isBlocked) {
             return new Response(
                 JSON.stringify({ error: 'License is blocked' }),
                 { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 403 }
             )
         }
 
-        // 4. Check Expiration / Grace Period
-        // Assumption A: heartbeat allowed during grace period. 
-        // Logic: if now > grace_until (or now > expires_at if no grace), then reject.
-        // Actually, logic is: active if <= expires_at OR <= grace_until.
+        if (licenseState.isExpired) {
+            if (licenseState.shouldPersistExpired) {
+                await supabaseClient
+                    .from('licenses')
+                    .update({ status: 'expired' })
+                    .eq('id', license.id);
+                
+                await logAudit(supabaseClient, {
+                    action: 'LICENSE_EXPIRED',
+                    entity: 'licenses',
+                    entityId: license.id,
+                    actor: 'system',
+                    metadata: {
+                        previousStatus: licenseState.storedStatus,
+                        effectiveStatus: 'expired',
+                        expiresAt: licenseState.expiresAt,
+                        graceUntil: licenseState.graceUntil
+                    }
+                });
+            }
 
-        const now = new Date()
-        const expiresAt = new Date(license.expires_at)
-        const graceUntil = license.grace_until ? new Date(license.grace_until) : null
-
-        let isExpired = false
-        if (graceUntil) {
-            if (now > graceUntil) isExpired = true
-        } else {
-            if (now > expiresAt) isExpired = true
-        }
-
-        if (isExpired) {
             return new Response(
                 JSON.stringify({ error: 'License expired' }),
                 { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 403 }

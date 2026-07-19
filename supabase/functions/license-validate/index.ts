@@ -3,6 +3,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { generateLicenseToken, verifyLicenseToken, LicensePayload } from "../_shared/license-token.ts"
 import { logAudit } from "../_shared/audit-logger.ts"
+import { resolveLicenseState } from "../_shared/license-state-resolver.ts"
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -90,19 +91,28 @@ serve(async (req) => {
 
         // 4. Calculate Status (Server Authority)
         const now = new Date()
-        const expiresAt = new Date(license.expires_at)
-        const graceUntil = license.grace_until ? new Date(license.grace_until) : null
-
-        let calculatedStatus = 'active'
-
-        if (license.status === 'blocked') {
-            calculatedStatus = 'blocked'
-        } else if (now <= expiresAt) {
-            calculatedStatus = 'active'
-        } else if (graceUntil && now <= graceUntil) {
-            calculatedStatus = 'grace'
-        } else {
-            calculatedStatus = 'expired'
+        const licenseState = resolveLicenseState(license, now);
+        const calculatedStatus = licenseState.effectiveStatus;
+        
+        // Persist expired status if needed (On Access Expiration)
+        if (licenseState.shouldPersistExpired) {
+            await supabaseClient
+                .from('licenses')
+                .update({ status: 'expired' })
+                .eq('id', license.id);
+                
+            await logAudit(supabaseClient, {
+                action: 'LICENSE_EXPIRED',
+                entity: 'licenses',
+                entityId: license.id,
+                actor: 'system',
+                metadata: {
+                    previousStatus: licenseState.storedStatus,
+                    effectiveStatus: 'expired',
+                    expiresAt: licenseState.expiresAt,
+                    graceUntil: licenseState.graceUntil
+                }
+            });
         }
 
         // 5. Validate Incoming Token (if present)
@@ -115,7 +125,7 @@ serve(async (req) => {
                 // Check if payload matches current server state
                 // We check critical fields: status, expiresAt, limits
                 const payloadExpires = new Date(tokenPayload.expiresAt).getTime();
-                const currentExpires = expiresAt.getTime();
+                const currentExpires = new Date(licenseState.expiresAt).getTime();
                 
                 // If token status differs from calculated status, or expiry changed
                 if (tokenPayload.status !== calculatedStatus || 
@@ -136,13 +146,13 @@ serve(async (req) => {
         if (!tokenValid) {
              const newPayload: LicensePayload = {
                 v: 1,
-                licenseKey: license.license_key ?? license.id, // Fallback to ID if key missing (should not happen with migration)
+                licenseKey: license.license_key ?? license.id, // Fallback to ID if key missing
                 licenseId: license.id,
                 customerId: license.customer_id,
                 planId: license.plan_id,
                 status: calculatedStatus as any,
-                expiresAt: license.expires_at,
-                graceUntil: license.grace_until,
+                expiresAt: licenseState.expiresAt,
+                graceUntil: licenseState.graceUntil,
                 limits: license.plans?.limits ?? {},
                 issuedAt: new Date().toISOString()
              };
